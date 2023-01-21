@@ -14,6 +14,7 @@ import numpy as np
 from io import StringIO
 from threading import Lock
 import torch
+
 # import fastapi_offline_swagger_ui
 import importlib.metadata
 from pydub import AudioSegment
@@ -24,19 +25,14 @@ import numpy as np
 SAMPLE_RATE = 16000
 LANGUAGE_CODES = sorted(list(tokenizer.LANGUAGES.keys()))
 
-projectMetadata = importlib.metadata.metadata('whisper-asr-webservice')
+projectMetadata = importlib.metadata.metadata("whisper-asr-webservice")
 app = FastAPI(
-    title=projectMetadata['Name'].title().replace('-', ' '),
-    description=projectMetadata['Summary'],
-    version=projectMetadata['Version'],
-    contact={
-        "url": projectMetadata['Home-page']
-    },
+    title=projectMetadata["Name"].title().replace("-", " "),
+    description=projectMetadata["Summary"],
+    version=projectMetadata["Version"],
+    contact={"url": projectMetadata["Home-page"]},
     # swagger_ui_parameters={"defaultModelsExpandDepth": -1},
-    license_info={
-        "name": "MIT License",
-        "url": projectMetadata['License']
-    }
+    license_info={"name": "MIT License", "url": projectMetadata["License"]},
 )
 
 # assets_path = fastapi_offline_swagger_ui.__path__[0]
@@ -53,7 +49,7 @@ app = FastAPI(
 #     applications.get_swagger_ui_html = swagger_monkey_patch
 
 # model_name = os.getenv("ASR_MODEL", "base")
-model_name = 'medium'
+model_name = "medium"
 if torch.cuda.is_available():
     model = whisper.load_model(model_name).cuda()
 else:
@@ -69,27 +65,39 @@ async def index():
 @app.post("/asr", tags=["Endpoints"])
 def transcribe(
     audio_file: UploadFile = File(...),
-    task: Union[str, None] = Query(default="transcribe", enum=[
-                                   "transcribe", "translate"]),
-    language: Union[str, None] = Query(default='es', enum=LANGUAGE_CODES),
+    task: Union[str, None] = Query(
+        default="transcribe", enum=["transcribe", "translate"]
+    ),
+    language: Union[str, None] = Query(default="es", enum=LANGUAGE_CODES),
     output: Union[str, None] = Query(
-        default="json", enum=["json", "vtt", "srt"]),
+        default="json", enum=["json", "vtt", "srt"]
+    ),
 ):
 
     result = run_asr(audio_file.file, task, language)
-    filename = audio_file.filename.split('.')[0]
-    if (output == "srt"):
+    filename = audio_file.filename.split(".")[0]
+    if output == "srt":
         srt_file = StringIO()
         write_srt(result["segments"], file=srt_file)
         srt_file.seek(0)
-        return StreamingResponse(srt_file, media_type="text/plain",
-                                 headers={'Content-Disposition': f'attachment; filename="{filename}.srt"'})
-    elif (output == "vtt"):
+        return StreamingResponse(
+            srt_file,
+            media_type="text/plain",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}.srt"'
+            },
+        )
+    elif output == "vtt":
         vtt_file = StringIO()
         write_vtt(result["segments"], file=vtt_file)
         vtt_file.seek(0)
-        return StreamingResponse(vtt_file, media_type="text/plain",
-                                 headers={'Content-Disposition': f'attachment; filename="{filename}.vtt"'})
+        return StreamingResponse(
+            vtt_file,
+            media_type="text/plain",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}.vtt"'
+            },
+        )
     else:
         return result
 
@@ -104,9 +112,7 @@ class TranscriptJob(BaseModel):
 
 
 @app.post("/dual")
-def dual_transcribe(
-    job: TranscriptJob
-):
+def dual_transcribe(job: TranscriptJob):
     result = run_dual_sox(job)
     return result
 
@@ -114,44 +120,70 @@ def dual_transcribe(
 def run_dual_sox(job: TranscriptJob):
     options_dict = {"task": "transcribe", "language": f"{job.language}"}
 
-    input_file = f'{job.base_path}/{job.interaction_id}.{job.audio_format}'
+    input_file = f"{job.base_path}/{job.interaction_id}.{job.audio_format}"
 
     # User usually talks first
-    user_file = f'{job.base_path}/split/{job.interaction_id}_USR.{job.audio_format}'
+    user_file = (
+        f"{job.base_path}/split/{job.interaction_id}_USR.{job.audio_format}"
+    )
     user_tfm = sox.Transformer()
-    user_tfm.set_output_format(file_type='au', rate=8000, channels=1)
+    user_tfm.set_output_format(file_type="au", rate=8000, channels=1)
     user_tfm.remix(remix_dictionary={1: [1]})
     user = user_tfm.build(input_file, user_file)
     user_transcript = model.transcribe(user_file, **options_dict)
 
-    agent_file = f'{job.base_path}/split/{job.interaction_id}_AGT.{job.audio_format}'
+    agent_file = (
+        f"{job.base_path}/split/{job.interaction_id}_AGT.{job.audio_format}"
+    )
     agent_tfm = sox.Transformer()
-    agent_tfm.set_output_format(file_type='au', rate=8000, channels=1)
+    agent_tfm.set_output_format(file_type="au", rate=8000, channels=1)
     agent_tfm.remix(remix_dictionary={1: [2]})
     agent = agent_tfm.build(input_file, agent_file)
     agent_transcript = model.transcribe(agent_file, **options_dict)
 
-    user_events = [{'text': event['text'], 'start': event['start'],
-                    'end': event['end'], 'speaker': 'user'} for event in user_transcript['segments']]
+    i = 0
+    utterances = []
+    # get the maximum of the lengths of both segment lists
 
-    agent_events = [{'text': event['text'], 'start': event['start'],
-                    'end': event['end'], 'speaker': 'agent'} for event in agent_transcript['segments']]
-    return {
-        'user': user_events,
-        'agent': agent_events
-    }
+    max_len = max(
+        len(user_transcript["segments"]), len(agent_transcript["segments"])
+    )
+    for i in range(max_len):
+        if i < len(user_transcript["segments"]):
+            event = user_transcript["segments"][i]
+            # push event to utterances list
+            utterances.append(
+                {
+                    "text": event["text"],
+                    "start": int(event["start"]) * 1000,
+                    "end": event["end"],
+                    "channel": 1,
+                }
+            )
+        if i < len(agent_transcript["segments"]):
+            event = agent_transcript["segments"][i]
+            # push event to utterances list
+            utterances.append(
+                {
+                    "text": event["text"],
+                    "start": event["start"],
+                    "end": event["end"],
+                    "channel": 2,
+                }
+            )
+    return {"utterances": utterances}
 
 
 def run_dual(job: TranscriptJob):
-    format = 'au'
-    base_path = '/Users/alexander/Downloads/calls'
+    format = "au"
+    base_path = "/Users/alexander/Downloads/calls"
     options_dict = {"task": "transcribe", "language": f"{job.language}"}
-    audio = f'{job.base_path}/{job.interaction_id}.{job.audio_format}'
+    audio = f"{job.base_path}/{job.interaction_id}.{job.audio_format}"
     stereo = AudioSegment.from_file(audio, format=format)
     monos = stereo.split_to_mono()
-    out_left = f'{job.base_path}/split/{job.interaction_id}_L.{format}'
+    out_left = f"{job.base_path}/split/{job.interaction_id}_L.{format}"
     mono_left = monos[0].export(out_left, format=format)
-    out_right = f'{job.base_path}/split/{job.interaction_id}_R.{format}'
+    out_right = f"{job.base_path}/split/{job.interaction_id}_R.{format}"
     mono_right = monos[1].export(out_right, format=format)
 
     result = model.transcribe(out_right, **options_dict)
@@ -175,13 +207,17 @@ def language_detection(
         _, probs = model.detect_language(mel)
     detected_lang_code = max(probs, key=probs.get)
 
-    result = {"detected_language": tokenizer.LANGUAGES[detected_lang_code],
-              "langauge_code": detected_lang_code}
+    result = {
+        "detected_language": tokenizer.LANGUAGES[detected_lang_code],
+        "langauge_code": detected_lang_code,
+    }
 
     return result
 
 
-def run_asr(file: BinaryIO, task: Union[str, None], language: Union[str, None]):
+def run_asr(
+    file: BinaryIO, task: Union[str, None], language: Union[str, None]
+):
     audio = load_audio(file)
     options_dict = {"task": task}
     if language:
@@ -212,7 +248,12 @@ def load_audio(file: BinaryIO, sr: int = SAMPLE_RATE):
         out, _ = (
             ffmpeg.input("pipe:", threads=0)
             .output("-", format="s16le", acodec="pcm_s16le", ac=1, ar=sr)
-            .run(cmd="ffmpeg", capture_stdout=True, capture_stderr=True, input=file.read())
+            .run(
+                cmd="ffmpeg",
+                capture_stdout=True,
+                capture_stderr=True,
+                input=file.read(),
+            )
         )
     except ffmpeg.Error as e:
         raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
